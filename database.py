@@ -4,7 +4,7 @@ from datetime import date
 from typing import Optional, AsyncGenerator
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
-from sqlalchemy import String, Integer, Numeric, Date, ForeignKey, text
+from sqlalchemy import String, Integer, Numeric, Date, ForeignKey, TEXT
 
 # 数据库连接 URL（采用 asyncmy 驱动）
 DB_USER = os.getenv("DB_USER", "root")
@@ -15,36 +15,42 @@ DB_NAME = os.getenv("DB_NAME", "librarysystem")
 DATABASE_URL = f"mysql+asyncmy://{DB_USER}:{DB_PASS}@{DB_HOST}:3306/{DB_NAME}?charset=utf8mb4"
 
 engine = create_async_engine(DATABASE_URL, echo=False, pool_size=10, max_overflow=20)
-# 创建异步会话工厂
-AsyncSessionLocal = async_sessionmaker(
-    bind=engine, # 绑定数据库引擎
-    class_=AsyncSession, # 使用异步会话类
-    expire_on_commit=False #会话提交后不自动过期对象，不重新查询数据库
-)
+AsyncSessionLocal = async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
 
-# 依赖注入：FastAPI 获取异步会话
+
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
     async with AsyncSessionLocal() as session:
         yield session
 
+
 class Base(DeclarativeBase):
     pass
 
+
 # ============ ORM 模型映射 ============
+
+class BookCategory(Base):
+    __tablename__ = "图书类别"
+
+    类别编号: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    类别名称: Mapped[str] = mapped_column(String(50), nullable=False)
+    类别描述: Mapped[Optional[str]] = mapped_column(String(255))
+
 
 class Book(Base):
     __tablename__ = "图书信息"
 
     图书编号: Mapped[str] = mapped_column(String(50), primary_key=True)
     书名: Mapped[str] = mapped_column(String(255), nullable=False)
-    作者: Mapped[Optional[str]] = mapped_column(String(100))   #optional表示该字段可以为空
+    作者: Mapped[Optional[str]] = mapped_column(String(100))
     出版社: Mapped[Optional[str]] = mapped_column(String(100))
+    简介: Mapped[Optional[str]] = mapped_column(TEXT)
     类别编号: Mapped[Optional[int]] = mapped_column(Integer)
     总库存: Mapped[int] = mapped_column(Integer, default=0)
     现有库存: Mapped[int] = mapped_column(Integer, default=0)
 
-    # 关联记录
     borrowings: Mapped[list["BorrowRecord"]] = relationship(back_populates="book")
+
 
 class Reader(Base):
     __tablename__ = "读者信息"
@@ -57,6 +63,7 @@ class Reader(Base):
     账号状态: Mapped[str] = mapped_column(String(20), default="正常")
 
     borrowings: Mapped[list["BorrowRecord"]] = relationship(back_populates="reader")
+
 
 class BorrowRecord(Base):
     __tablename__ = "借阅记录"
@@ -71,6 +78,7 @@ class BorrowRecord(Base):
     reader: Mapped["Reader"] = relationship(back_populates="borrowings")
     book: Mapped["Book"] = relationship(back_populates="borrowings")
     fines: Mapped[list["FineRecord"]] = relationship(back_populates="borrowing")
+
 
 class FineRecord(Base):
     __tablename__ = "罚款记录"

@@ -1,0 +1,308 @@
+// static/script.js
+
+// ============ 工具函数 ============
+function showMessage(elementId, msg, type = 'success') {
+    const el = document.getElementById(elementId);
+    if (!el) return;
+    const className = type === 'success' ? 'alert-success' : 'alert-danger';
+    el.innerHTML = `<div class="alert ${className}">${msg}</div>`;
+}
+
+async function apiCall(url, method = 'GET', data = null) {
+    try {
+        const options = { method, headers: { 'Content-Type': 'application/json' } };
+        if (data) options.body = JSON.stringify(data);
+        const res = await fetch(url, options);
+        return await res.json();
+    } catch (err) {
+        console.error("API Call Error:", err);
+        return { success: false, message: "网络请求异常或服务器无响应" };
+    }
+}
+
+// ============ Tab 切换 ============
+function switchTab(tab) {
+    document.querySelectorAll('.tab-content').forEach(el => el.style.display = 'none');
+    const targetTab = document.getElementById(`tab-${tab}`);
+    if (targetTab) targetTab.style.display = 'block';
+    
+    const titles = {
+        'search': '🔍 馆藏图书查询',
+        'borrow': '📝 办理借书',
+        'return': '🔄 办理还书',
+        'fine': '💰 缴纳罚金',
+        'admin': '⚙️ 系统维护',
+        'recommend': '🤖 智能推荐'
+    };
+    const titleEl = document.getElementById('pageTitle');
+    if (titleEl) titleEl.textContent = titles[tab] || '图书馆系统';
+    
+    // 切换 Tab 时自动加载数据
+    if (tab === 'borrow') loadBorrowForm();
+    if (tab === 'return') loadReturnForm();
+    if (tab === 'fine') loadFines();
+    if (tab === 'admin') loadViolators();
+    if (tab === 'recommend') loadRecommendForm();
+}
+
+// ============ 1. 搜索图书 ============
+async function searchBooks() {
+    const keywordInput = document.getElementById('searchInput');
+    const keyword = keywordInput ? keywordInput.value.trim() : '';
+    const data = await apiCall(`/api/books/search?keyword=${encodeURIComponent(keyword)}`);
+    
+    const container = document.getElementById('searchResults');
+    if (!container) return;
+    
+    if (!Array.isArray(data) || data.length === 0) {
+        container.innerHTML = '<div class="alert alert-warning">未找到相关图书</div>';
+        return;
+    }
+    
+    container.innerHTML = data.map(book => `
+        <div class="card mb-2 p-3">
+            <div class="row align-items-center">
+                <div class="col-md-6">
+                    <strong class="h6 mb-0">${book.书名}</strong>
+                    <span class="badge bg-secondary ms-2">${book.作者}</span>
+                </div>
+                <div class="col-md-3">
+                    库存：<span class="badge ${book.现有库存 > 0 ? 'bg-success' : 'bg-danger'}">${book.现有库存} / ${book.总库存}</span>
+                </div>
+                <div class="col-md-3 text-end">
+                    <small class="text-muted">${book.出版社 || '未知出版社'}</small>
+                </div>
+            </div>
+        </div>
+    `).join('');
+}
+
+// ============ 2. 借书 ============
+async function loadBorrowForm() {
+    const [readers, books] = await Promise.all([
+        apiCall('/api/readers/all'),
+        apiCall('/api/books/all')
+    ]);
+    
+    const readerSel = document.getElementById('borrowReader');
+    const bookSel = document.getElementById('borrowBook');
+    
+    if (readerSel && Array.isArray(readers)) {
+        readerSel.innerHTML = readers.length ? readers.map(r => 
+            `<option value="${r.读者编号}">${r.姓名} (已借 ${r.已借数量}/${r.最大借阅量})</option>`
+        ).join('') : '<option value="">暂无可用读者</option>';
+    }
+    
+    if (bookSel && Array.isArray(books)) {
+        bookSel.innerHTML = books.length ? books.map(b => 
+            `<option value="${b.图书编号}">${b.书名} (余 ${b.现有库存})</option>`
+        ).join('') : '<option value="">暂无在馆图书</option>';
+    }
+}
+
+async function borrowBook() {
+    const reader_id = document.getElementById('borrowReader').value;
+    const book_id = document.getElementById('borrowBook').value;
+    
+    if (!reader_id || !book_id) {
+        showMessage('borrowResult', '请选择读者与要借阅的图书', 'danger');
+        return;
+    }
+    
+    const result = await apiCall('/api/borrow', 'POST', { reader_id: parseInt(reader_id), book_id });
+    showMessage('borrowResult', result.message, result.success ? 'success' : 'danger');
+    if (result.success) loadBorrowForm();
+}
+
+// ============ 3. 还书 ============
+async function loadReturnForm() {
+    const data = await apiCall('/api/borrowings/active');
+    const readerSel = document.getElementById('returnReader');
+    if (!readerSel) return;
+
+    if (!Array.isArray(data) || data.length === 0) {
+        readerSel.innerHTML = '<option value="">暂无需还书读者</option>';
+        document.getElementById('returnBook').innerHTML = '<option value="">无待还记录</option>';
+        return;
+    }
+    
+    // 按读者去重
+    const readersMap = new Map();
+    data.forEach(r => readersMap.set(String(r.读者编号), r.姓名));
+    
+    readerSel.innerHTML = Array.from(readersMap.entries()).map(([id, name]) => 
+        `<option value="${id}">${name}</option>`
+    ).join('');
+    
+    updateReturnBooks();
+}
+
+async function updateReturnBooks() {
+    const readerId = document.getElementById('returnReader').value;
+    const bookSel = document.getElementById('returnBook');
+    if (!readerId || !bookSel) return;
+    
+    const data = await apiCall('/api/borrowings/active');
+    const books = Array.isArray(data) ? data.filter(r => String(r.读者编号) === String(readerId)) : [];
+    
+    if (books.length === 0) {
+        bookSel.innerHTML = '<option value="">该读者暂无未还图书</option>';
+        return;
+    }
+    bookSel.innerHTML = books.map(b => 
+        `<option value="${b.图书编号}">${b.书名}</option>`
+    ).join('');
+}
+
+async function returnBook() {
+    const reader_id = document.getElementById('returnReader').value;
+    const book_id = document.getElementById('returnBook').value;
+    
+    if (!reader_id || !book_id) {
+        showMessage('returnResult', '请选择有效读者和待归还的图书', 'danger');
+        return;
+    }
+    
+    const result = await apiCall('/api/return', 'POST', { reader_id: parseInt(reader_id), book_id });
+    showMessage('returnResult', result.message, result.success ? 'success' : 'danger');
+    if (result.success) loadReturnForm();
+}
+
+// ============ 4. 罚金 ============
+let selectedFineId = null;
+
+async function loadFines() {
+    const data = await apiCall('/api/fines/unpaid');
+    const container = document.getElementById('fineList');
+    if (!container) return;
+    
+    if (!Array.isArray(data) || data.length === 0) {
+        container.innerHTML = '<div class="alert alert-success">🎉 暂无未缴罚单</div>';
+        selectedFineId = null;
+        return;
+    }
+    
+    container.innerHTML = data.map(f => `
+        <div class="card mb-2 p-3 fine-item ${selectedFineId === f.罚款编号 ? 'border-danger bg-light' : ''}" 
+             style="cursor: pointer;"
+             onclick="selectFine(${f.罚款编号})">
+            <div class="row align-items-center">
+                <div class="col-md-3"><strong>${f.姓名}</strong></div>
+                <div class="col-md-3 text-danger font-weight-bold">金额：￥${f.罚款金额}</div>
+                <div class="col-md-4">原因：${f.罚款原因}</div>
+                <div class="col-md-2 text-end"><span class="badge bg-danger">未缴</span></div>
+            </div>
+        </div>
+    `).join('');
+}
+
+function selectFine(id) {
+    selectedFineId = id;
+    loadFines();
+}
+
+async function payFine() {
+    if (!selectedFineId) {
+        showMessage('fineResult', '请先点击选择一笔待缴纳的罚单', 'danger');
+        return;
+    }
+    const result = await apiCall('/api/pay_fine', 'POST', { fine_id: selectedFineId });
+    showMessage('fineResult', result.message, result.success ? 'success' : 'danger');
+    if (result.success) {
+        selectedFineId = null;
+        loadFines();
+    }
+}
+
+// ============ 5. 系统维护 ============
+async function scanOverdue() {
+    const result = await apiCall('/api/scan_overdue', 'POST');
+    showMessage('adminResult', result.message, result.success ? 'success' : 'danger');
+    loadViolators();
+}
+
+async function freezeViolators() {
+    const result = await apiCall('/api/freeze_violators', 'POST');
+    showMessage('adminResult', result.message, result.success ? 'success' : 'danger');
+    loadViolators();
+}
+
+async function loadViolators() {
+    const data = await apiCall('/api/violators');
+    const container = document.getElementById('violatorList');
+    if (!container) return;
+
+    if (!Array.isArray(data) || data.length === 0) {
+        container.innerHTML = '<div class="alert alert-success">暂无违规账号</div>';
+        return;
+    }
+    container.innerHTML = data.map(v => `
+        <div class="card mb-2 p-2">
+            <div class="d-flex justify-content-between align-items-center">
+                <span><strong>${v.姓名}</strong> (联系电话: ${v.联系电话 || '无'})</span>
+                <span class="badge bg-danger">${v.账号状态}</span>
+            </div>
+        </div>
+    `).join('');
+}
+
+// ============ 6. AI 推荐 ============
+async function loadRecommendForm() {
+    const data = await apiCall('/api/readers/all');
+    const sel = document.getElementById('recommendReader');
+    if (!sel) return;
+
+    if (!Array.isArray(data) || data.length === 0) {
+        sel.innerHTML = '<option value="">无有效读者</option>';
+        return;
+    }
+    sel.innerHTML = data.map(r => `<option value="${r.读者编号}">${r.姓名}</option>`).join('');
+}
+
+async function getRecommend() {
+    const readerId = document.getElementById('recommendReader').value;
+    if (!readerId) return;
+
+    const container = document.getElementById('recommendResult');
+    container.innerHTML = '<div class="spinner-border text-primary" role="status"><span class="visually-hidden">计算中...</span></div>';
+
+    const data = await apiCall(`/api/recommend/${readerId}`);
+    
+    if (!Array.isArray(data) || data.length === 0) {
+        container.innerHTML = '<div class="alert alert-info">暂无推荐图书</div>';
+        return;
+    }
+    
+    container.innerHTML = `
+        <div class="row">
+            ${data.map(book => `
+                <div class="col-md-4 mb-3">
+                    <div class="card h-100 p-3 shadow-sm">
+                        <strong class="h6 mb-1">${book.书名}</strong>
+                        <small class="text-muted mb-2">作者: ${book.作者}</small>
+                        <div>
+                            <span class="badge bg-info text-dark">匹配度 ${(book.相似度 * 100).toFixed(1)}%</span>
+                        </div>
+                    </div>
+                </div>
+            `).join('')}
+        </div>
+    `;
+}
+
+// ============ 统一初始化监听器 ============
+document.addEventListener('DOMContentLoaded', () => {
+    switchTab('search');
+    
+    const searchInput = document.getElementById('searchInput');
+    if (searchInput) {
+        searchInput.addEventListener('keyup', (e) => {
+            if (e.key === 'Enter') searchBooks();
+        });
+    }
+
+    const returnReader = document.getElementById('returnReader');
+    if (returnReader) {
+        returnReader.addEventListener('change', updateReturnBooks);
+    }
+});

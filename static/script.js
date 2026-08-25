@@ -55,7 +55,6 @@ async function loadCategories() {
     const data = await apiCall('/api/categories');
     const sel = document.getElementById('categoryFilter');
     if (!sel || !Array.isArray(data)) return;
-    
     sel.innerHTML = '<option value="0">📚 全部分类</option>' + 
         data.map(c => `<option value="${c.类别编号}">${c.类别名称}</option>`).join('');
 }
@@ -64,21 +63,15 @@ async function loadCategories() {
 async function searchBooks() {
     const keyword = document.getElementById('searchInput').value.trim();
     const category = document.getElementById('categoryFilter').value || '0';
-    
     let url = `/api/books/search?keyword=${encodeURIComponent(keyword)}`;
-    if (category && category !== '0') {
-        url += `&category=${category}`;
-    }
-    
+    if (category && category !== '0') url += `&category=${category}`;
     const data = await apiCall(url);
     const container = document.getElementById('searchResults');
     if (!container) return;
-    
     if (!Array.isArray(data) || data.length === 0) {
         container.innerHTML = '<div class="alert alert-warning">未找到相关图书</div>';
         return;
     }
-    
     container.innerHTML = data.map(book => `
         <div class="card mb-3 p-3">
             <div class="row">
@@ -108,16 +101,13 @@ async function loadBorrowForm() {
         apiCall('/api/readers/all'),
         apiCall('/api/books/all')
     ]);
-    
     const readerSel = document.getElementById('borrowReader');
     const bookSel = document.getElementById('borrowBook');
-    
     if (readerSel && Array.isArray(readers)) {
         readerSel.innerHTML = readers.length ? readers.map(r => 
             `<option value="${r.读者编号}">${r.姓名} (已借 ${r.已借数量}/${r.最大借阅量})</option>`
         ).join('') : '<option value="">暂无可用读者</option>';
     }
-    
     if (bookSel && Array.isArray(books)) {
         bookSel.innerHTML = books.length ? books.map(b => 
             `<option value="${b.图书编号}">${b.书名} (余 ${b.现有库存})</option>`
@@ -134,62 +124,179 @@ async function borrowBook() {
         return;
     }
     
-    const result = await apiCall('/api/borrow', 'POST', { reader_id: parseInt(reader_id), book_id });
+    // 🔥 防止重复点击
+    const btn = document.querySelector('#tab-borrow .btn-success');
+    if (btn) {
+        btn.disabled = true;
+        btn.textContent = '提交中...';
+    }
+
+    const result = await apiCall('/api/borrow', 'POST', { 
+        reader_id: parseInt(reader_id), 
+        book_id: book_id 
+    });
+    
+    if (btn) {
+        btn.disabled = false;
+        btn.textContent = '提交借阅';
+    }
+
     showMessage('borrowResult', result.message, result.success ? 'success' : 'danger');
     if (result.success) loadBorrowForm();
 }
 
-// ============ 3. 还书 ============
+// ============ 3. 还书板块重构 ============
+let allActiveBorrowings = []; // 缓存当前所有未还记录
+let currentFilteredReaders = []; // 缓存去重后的读者列表
+
+// 加载还书表单与读者数据
 async function loadReturnForm() {
     const data = await apiCall('/api/borrowings/active');
+    allActiveBorrowings = Array.isArray(data) ? data : [];
+    
+    // 读者去重处理
+    const readersMap = new Map();
+    allActiveBorrowings.forEach(r => {
+        if (!readersMap.has(String(r.读者编号))) {
+            readersMap.set(String(r.读者编号), {
+                id: r.读者编号,
+                name: r.姓名,
+                phone: r.联系电话 || ''
+            });
+        }
+    });
+    
+    currentFilteredReaders = Array.from(readersMap.values());
+    renderReturnReaderOptions(currentFilteredReaders);
+    
+    // 重置图书展示区
+    const container = document.getElementById('returnBooksContainer');
+    const badge = document.getElementById('borrowCountBadge');
+    if (badge) {
+        badge.className = 'badge bg-secondary';
+        badge.textContent = '未选择读者';
+    }
+    if (container) {
+        container.innerHTML = '<div class="alert alert-light border text-center text-muted">请选择上方读者查看名下借阅图书</div>';
+    }
+}
+
+// 渲染读者下拉选项
+function renderReturnReaderOptions(readers) {
     const readerSel = document.getElementById('returnReader');
     if (!readerSel) return;
-
-    if (!Array.isArray(data) || data.length === 0) {
-        readerSel.innerHTML = '<option value="">暂无需还书读者</option>';
-        document.getElementById('returnBook').innerHTML = '<option value="">无待还记录</option>';
+    
+    if (readers.length === 0) {
+        readerSel.innerHTML = '<option value="">暂无待还书读者</option>';
         return;
     }
     
+    readerSel.innerHTML = '<option value="">-- 请选择读者 --</option>' + 
+        readers.map(r => `<option value="${r.id}">${r.name} (${r.phone || '无电话'})</option>`).join('');
+}
+
+// 模糊搜索读者（支持姓名或电话）
+function filterReturnReaders() {
+    const keyword = document.getElementById('returnReaderSearchInput').value.trim().toLowerCase();
+    
+    // 重新从完整借阅记录中提取读者
     const readersMap = new Map();
-    data.forEach(r => readersMap.set(String(r.读者编号), r.姓名));
+    allActiveBorrowings.forEach(r => {
+        if (!readersMap.has(String(r.读者编号))) {
+            readersMap.set(String(r.读者编号), {
+                id: r.读者编号,
+                name: r.姓名,
+                phone: r.联系电话 || ''
+            });
+        }
+    });
     
-    readerSel.innerHTML = Array.from(readersMap.entries()).map(([id, name]) => 
-        `<option value="${id}">${name}</option>`
-    ).join('');
+    const allReaders = Array.from(readersMap.values());
+    const filtered = allReaders.filter(r => 
+        r.name.toLowerCase().includes(keyword) || r.phone.includes(keyword)
+    );
     
-    updateReturnBooks();
+    renderReturnReaderOptions(filtered);
+    
+    // 如果过滤后刚好只剩一位读者，自动选中并触发展示
+    if (filtered.length === 1) {
+        document.getElementById('returnReader').value = filtered[0].id;
+        onReturnReaderSelected();
+    }
 }
 
-async function updateReturnBooks() {
+// 当选中读者时，渲染该读者的借阅列表卡片
+function onReturnReaderSelected() {
     const readerId = document.getElementById('returnReader').value;
-    const bookSel = document.getElementById('returnBook');
-    if (!readerId || !bookSel) return;
-    
-    const data = await apiCall('/api/borrowings/active');
-    const books = Array.isArray(data) ? data.filter(r => String(r.读者编号) === String(readerId)) : [];
-    
-    if (books.length === 0) {
-        bookSel.innerHTML = '<option value="">该读者暂无未还图书</option>';
+    const container = document.getElementById('returnBooksContainer');
+    const badge = document.getElementById('borrowCountBadge');
+    if (!container) return;
+
+    if (!readerId) {
+        container.innerHTML = '<div class="alert alert-light border text-center text-muted">请选择上方读者查看名下借阅图书</div>';
+        if (badge) {
+            badge.className = 'badge bg-secondary';
+            badge.textContent = '未选择读者';
+        }
         return;
     }
-    bookSel.innerHTML = books.map(b => 
-        `<option value="${b.图书编号}">${b.书名}</option>`
-    ).join('');
+
+    const userBooks = allActiveBorrowings.filter(r => String(r.读者编号) === String(readerId));
+    
+    if (badge) {
+        badge.className = 'badge bg-primary';
+        badge.textContent = `待还 ${userBooks.length} 本`;
+    }
+
+    if (userBooks.length === 0) {
+        container.innerHTML = '<div class="alert alert-success">🎉 该读者名下所有借阅均已还清！</div>';
+        return;
+    }
+
+    container.innerHTML = userBooks.map(item => `
+        <div class="card mb-2 p-3 ${item.是否逾期 ? 'border-danger' : ''}">
+            <div class="row align-items-center">
+                <div class="col-md-4">
+                    <strong class="h6 mb-0">${item.书名}</strong>
+                    <span class="badge bg-secondary ms-1">${item.作者 || '佚名'}</span>
+                </div>
+                <div class="col-md-3 text-muted">
+                    <small>借出: ${item.借出日期}</small><br>
+                    <small>应还: ${item.应还日期}</small>
+                </div>
+                <div class="col-md-2">
+                    ${item.是否逾期 
+                        ? '<span class="badge bg-danger">⚠️ 已逾期</span>' 
+                        : '<span class="badge bg-success">正常借阅</span>'}
+                </div>
+                <div class="col-md-3 text-end">
+                    <button class="btn btn-sm btn-outline-warning" 
+                            onclick="executeReturnBook(${item.读者编号}, '${item.图书编号}', '${item.书名}')">
+                        🔄 归还此书
+                    </button>
+                </div>
+            </div>
+        </div>
+    `).join('');
 }
 
-async function returnBook() {
-    const reader_id = document.getElementById('returnReader').value;
-    const book_id = document.getElementById('returnBook').value;
-    
-    if (!reader_id || !book_id) {
-        showMessage('returnResult', '请选择有效读者和待归还的图书', 'danger');
-        return;
-    }
-    
-    const result = await apiCall('/api/return', 'POST', { reader_id: parseInt(reader_id), book_id });
+// 执行还书操作
+async function executeReturnBook(readerId, bookId, bookName) {
+    if (!confirm(`确认办理归还《${bookName}》吗？`)) return;
+
+    const result = await apiCall('/api/return', 'POST', { 
+        reader_id: parseInt(readerId), 
+        book_id: String(bookId) 
+    });
+
     showMessage('returnResult', result.message, result.success ? 'success' : 'danger');
-    if (result.success) loadReturnForm();
+
+    if (result.success) {
+        // 重新拉取借阅数据，并保持当前选中读者以便即时刷新图书卡片
+        const data = await apiCall('/api/borrowings/active');
+        allActiveBorrowings = Array.isArray(data) ? data : [];
+        onReturnReaderSelected();
+    }
 }
 
 // ============ 4. 罚金 ============
@@ -199,17 +306,14 @@ async function loadFines() {
     const data = await apiCall('/api/fines/unpaid');
     const container = document.getElementById('fineList');
     if (!container) return;
-    
     if (!Array.isArray(data) || data.length === 0) {
         container.innerHTML = '<div class="alert alert-success">🎉 暂无未缴罚单</div>';
         selectedFineId = null;
         return;
     }
-    
     container.innerHTML = data.map(f => `
         <div class="card mb-2 p-3 fine-item ${selectedFineId === f.罚款编号 ? 'border-danger bg-light' : ''}" 
-             style="cursor: pointer;"
-             onclick="selectFine(${f.罚款编号})">
+             style="cursor: pointer;" onclick="selectFine(${f.罚款编号})">
             <div class="row align-items-center">
                 <div class="col-md-3"><strong>${f.姓名}</strong></div>
                 <div class="col-md-3 text-danger font-weight-bold">金额：￥${f.罚款金额}</div>
@@ -239,14 +343,8 @@ async function payFine() {
 }
 
 // ============ 5. 系统维护 ============
-async function scanOverdue() {
-    const result = await apiCall('/api/scan_overdue', 'POST');
-    showMessage('adminResult', result.message, result.success ? 'success' : 'danger');
-    loadViolators();
-}
-
-async function freezeViolators() {
-    const result = await apiCall('/api/freeze_violators', 'POST');
+async function scanAndFreeze() {
+    const result = await apiCall('/api/admin/scan_and_freeze', 'POST');
     showMessage('adminResult', result.message, result.success ? 'success' : 'danger');
     loadViolators();
 }
@@ -255,15 +353,14 @@ async function loadViolators() {
     const data = await apiCall('/api/violators');
     const container = document.getElementById('violatorList');
     if (!container) return;
-
     if (!Array.isArray(data) || data.length === 0) {
-        container.innerHTML = '<div class="alert alert-success">暂无违规账号</div>';
+        container.innerHTML = '<div class="alert alert-success">🎉 暂无违规账号</div>';
         return;
     }
     container.innerHTML = data.map(v => `
         <div class="card mb-2 p-2">
             <div class="d-flex justify-content-between align-items-center">
-                <span><strong>${v.姓名}</strong> (联系电话: ${v.联系电话 || '无'})</span>
+                <span><strong>${v.姓名}</strong> (${v.联系电话 || '无'})</span>
                 <span class="badge bg-danger">${v.账号状态}</span>
             </div>
         </div>
@@ -275,7 +372,6 @@ async function loadRecommendForm() {
     const data = await apiCall('/api/readers/all');
     const sel = document.getElementById('recommendReader');
     if (!sel) return;
-
     if (!Array.isArray(data) || data.length === 0) {
         sel.innerHTML = '<option value="">无有效读者</option>';
         return;
@@ -286,17 +382,13 @@ async function loadRecommendForm() {
 async function getRecommend() {
     const readerId = document.getElementById('recommendReader').value;
     if (!readerId) return;
-
     const container = document.getElementById('recommendResult');
     container.innerHTML = '<div class="spinner-border text-primary" role="status"><span class="visually-hidden">计算中...</span></div>';
-
     const data = await apiCall(`/api/recommend/${readerId}`);
-    
     if (!Array.isArray(data) || data.length === 0) {
         container.innerHTML = '<div class="alert alert-info">暂无推荐图书</div>';
         return;
     }
-    
     container.innerHTML = `
         <div class="row">
             ${data.map(book => `
@@ -322,22 +414,16 @@ async function logout() {
 }
 
 // ============ 8. 读者信息管理 ============
-
-// 加载读者列表
 async function loadReaderList() {
     const data = await apiCall('/api/readers/all');
     const container = document.getElementById('readerList');
     if (!container) return;
-
-    // 清除搜索提示
     const existingMsg = container.querySelector('.search-result-msg');
     if (existingMsg) existingMsg.remove();
-
     if (!Array.isArray(data) || data.length === 0) {
         container.innerHTML = '<div class="alert alert-info">📭 暂无读者信息</div>';
         return;
     }
-
     container.innerHTML = data.map(r => `
         <div class="card mb-2 p-3" id="reader-${r.读者编号}">
             <div class="row align-items-center">
@@ -363,12 +449,10 @@ async function loadReaderList() {
     `).join('');
 }
 
-// 搜索读者（前端过滤）
 function searchReaders() {
     const keyword = document.getElementById('readerSearchInput').value.trim().toLowerCase();
     const cards = document.querySelectorAll('#readerList .card');
     const container = document.getElementById('readerList');
-    
     let foundCount = 0;
     cards.forEach(card => {
         const text = card.textContent.toLowerCase();
@@ -379,11 +463,8 @@ function searchReaders() {
             card.style.display = 'none';
         }
     });
-    
-    // 显示搜索结果提示
     const existingMsg = container.querySelector('.search-result-msg');
     if (existingMsg) existingMsg.remove();
-    
     if (foundCount === 0 && keyword) {
         const msg = document.createElement('div');
         msg.className = 'alert alert-warning search-result-msg';
@@ -392,24 +473,19 @@ function searchReaders() {
     }
 }
 
-// 显示修改手机号弹窗
 function showEditPhone(readerId, name, currentPhone) {
     const newPhone = prompt(`修改 ${name} 的手机号\n当前号码：${currentPhone}\n请输入新的11位手机号：`);
     if (newPhone === null) return;
-
     const phone = newPhone.trim();
     if (!/^1\d{10}$/.test(phone)) {
         alert('❌ 请输入有效的11位手机号！');
         return;
     }
-
     updateReaderPhone(readerId, phone);
 }
 
-// 修改读者手机号
 async function updateReaderPhone(readerId, newPhone) {
     const result = await apiCall(`/api/readers/${readerId}/phone`, 'PUT', { phone: newPhone });
-
     if (result.success) {
         alert('✅ ' + result.message);
         loadReaderList();
@@ -418,14 +494,11 @@ async function updateReaderPhone(readerId, newPhone) {
     }
 }
 
-// 注销读者
 async function deleteReader(readerId, name) {
     if (!confirm(`确定要注销读者 "${name}" 吗？\n如果该读者有未归还的图书，将无法注销。`)) {
         return;
     }
-
     const result = await apiCall(`/api/readers/${readerId}`, 'DELETE');
-
     if (result.success) {
         alert('✅ ' + result.message);
         loadReaderList();
@@ -434,11 +507,9 @@ async function deleteReader(readerId, name) {
     }
 }
 
-// 添加读者
 async function addReader() {
     const name = document.getElementById('readerName').value.trim();
     const phone = document.getElementById('readerPhone').value.trim();
-
     if (!name) {
         showMessage('addReaderResult', '请输入读者姓名！', 'danger');
         return;
@@ -451,9 +522,7 @@ async function addReader() {
         showMessage('addReaderResult', '请输入有效的11位手机号！', 'danger');
         return;
     }
-
     const result = await apiCall('/api/readers', 'POST', { name, phone });
-
     if (result.success) {
         document.getElementById('readerName').value = '';
         document.getElementById('readerPhone').value = '';
@@ -468,14 +537,12 @@ async function addReader() {
 document.addEventListener('DOMContentLoaded', () => {
     switchTab('search');
     loadCategories();
-    
     const searchInput = document.getElementById('searchInput');
     if (searchInput) {
         searchInput.addEventListener('keyup', (e) => {
             if (e.key === 'Enter') searchBooks();
         });
     }
-    
     const readerSearchInput = document.getElementById('readerSearchInput');
     if (readerSearchInput) {
         readerSearchInput.addEventListener('keyup', (e) => {

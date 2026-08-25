@@ -53,14 +53,13 @@ body {
     transform: translateY(-2px);
     box-shadow: 0 4px 12px rgba(0,0,0,0.08);
 }
-/* 读者列表滚动容器 */
+
 .reader-list-container {
     max-height: 400px;
     overflow-y: auto;
     padding-right: 5px;
 }
 
-/* 滚动条美化（可选） */
 .reader-list-container::-webkit-scrollbar {
     width: 6px;
 }

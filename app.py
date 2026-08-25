@@ -1,4 +1,4 @@
-# app.py - 现代化 SQLAlchemy 2.0 ORM 版本
+# app.py - 现代化 SQLAlchemy 2.0 ORM 完整版（业务逻辑全内置，不依赖 MySQL 触发器与存储过程）
 import os
 import uvicorn
 import asyncio
@@ -22,6 +22,7 @@ from sqlalchemy.orm import joinedload
 
 from database import engine, get_db, Book, Reader, BorrowRecord, FineRecord, BookCategory
 from recommend import get_recommendations
+from templates.config import ADMIN_USERNAME, ADMIN_PASSWORD
 
 # ============ 模板引擎配置 ============
 jinja2_env = Environment(loader=FileSystemLoader("templates"), auto_reload=True, cache_size=0)
@@ -35,7 +36,7 @@ async def lifespan(app: FastAPI):
     await engine.dispose()
     print("✅ 数据库引擎已断开释放")
 
-app = FastAPI(title="图书借阅管理系统 (ORM版)", version="2.0", lifespan=lifespan)
+app = FastAPI(title="图书借阅管理系统 (ORM全功能版)", version="2.0", lifespan=lifespan)
 
 # Session 中间件
 app.add_middleware(SessionMiddleware, secret_key=secrets.token_hex(16))
@@ -44,10 +45,6 @@ app.add_middleware(SessionMiddleware, secret_key=secrets.token_hex(16))
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 executor = ThreadPoolExecutor(max_workers=4)
-
-# ============ 管理员账号配置 ============
-ADMIN_USERNAME = "admin"
-ADMIN_PASSWORD = "123456"
 
 # ============ 数据验证模型 ============
 class BorrowRequest(BaseModel):
@@ -61,7 +58,7 @@ class ReturnRequest(BaseModel):
 class PayFineRequest(BaseModel):
     fine_id: int
 
-# ============ 登录相关路由 ============
+# ============ 登录认证相关路由 ============
 
 @app.get("/login", response_class=HTMLResponse)
 async def login_page(request: Request):
@@ -91,7 +88,7 @@ async def index(request: Request):
         return RedirectResponse(url="/login")
     return templates.TemplateResponse(request=request, name="index.html")
 
-# ============ ORM API 接口 ============
+# ============ 图书与读者查询 API ============
 
 # 1. 搜索图书
 @app.get("/api/books/search")
@@ -129,7 +126,7 @@ async def get_all_books(db: AsyncSession = Depends(get_db)):
     books = result.scalars().all()
     return [{"图书编号": b.图书编号, "书名": b.书名, "现有库存": b.现有库存} for b in books]
 
-# 3. 获取正常状态读者（仅供借书下拉框使用）
+# 3. 获取所有读者
 @app.get("/api/readers/all")
 async def get_all_readers(db: AsyncSession = Depends(get_db)):
     stmt = select(Reader).order_by(Reader.读者编号)
@@ -147,25 +144,32 @@ async def get_all_readers(db: AsyncSession = Depends(get_db)):
         for r in readers
     ]
 
-# 4. 借书业务（修复单次借阅和防重逻辑）
+# ============ 核心借还业务 API ============
+
+# 4. 借书业务（原触发器 1、2 逻辑已内置）
 @app.post("/api/borrow")
 async def borrow_book(req: BorrowRequest, db: AsyncSession = Depends(get_db)):
-    # 1. 检查图书在馆库存
     book = await db.get(Book, req.book_id)
-    if not book or book.现有库存 <= 0:
-        return {"success": False, "message": "借阅失败：该图书暂无在馆库存！"}
-    
-    # 2. 检查读者账号状态与借阅限额
+    if not book:
+        return {"success": False, "message": "借阅失败：未找到该图书！"}
+
     reader = await db.get(Reader, req.reader_id)
     if not reader:
         return {"success": False, "message": "借阅失败：读者不存在！"}
-    if reader.账号状态 != "正常":
-        return {"success": False, "message": f"借阅失败：该账号处于【{reader.账号状态}】状态，无法借书！"}
+
+    # 规则 1：账号冻结不能借书
+    if reader.账号状态 == "冻结":
+        return {"success": False, "message": "借阅失败：您的账号已被冻结！"}
+
+    # 规则 2：达到借阅上限不能借书
     if reader.已借数量 >= reader.最大借阅量:
-        return {"success": False, "message": f"借阅失败：读者借阅数量已达上限（{reader.最大借阅量}本）！"}
+        return {"success": False, "message": f"借阅失败：您已达到最大借书数量限制（{reader.最大借阅量}本）！"}
+
+    # 规则 3：图书库存不足不能借书
+    if book.现有库存 <= 0:
+        return {"success": False, "message": "借阅失败：该图书当前库存不足！"}
 
     try:
-        # 创建借阅记录
         new_record = BorrowRecord(
             读者编号=req.reader_id,
             图书编号=req.book_id,
@@ -174,19 +178,18 @@ async def borrow_book(req: BorrowRequest, db: AsyncSession = Depends(get_db)):
             记录状态="借阅中"
         )
         db.add(new_record)
-        
-        # 💡 注释掉下方两行，避免与 MySQL 数据库 Trigger 重复扣减
-        # 如果你的数据库没有建 Trigger，请取消注释下面两行：
-        # book.现有库存 -= 1
-        # reader.已借数量 += 1
+
+        # 联动更新数量
+        reader.已借数量 += 1
+        book.现有库存 -= 1
 
         await db.commit()
         return {"success": True, "message": "借书成功！"}
     except Exception as e:
         await db.rollback()
-        raise HTTPException(status_code=400, detail=f"事务处理异常: {str(e)}")
+        raise HTTPException(status_code=400, detail=f"借书事务处理异常: {str(e)}")
 
-# 5. 获取未还记录（增强版：返回借阅明细和超期状态）
+# 5. 获取未还记录（增强版）
 @app.get("/api/borrowings/active")
 async def get_active_borrowings(db: AsyncSession = Depends(get_db)):
     today = date.today()
@@ -198,7 +201,6 @@ async def get_active_borrowings(db: AsyncSession = Depends(get_db)):
     )
     result = await db.execute(stmt)
     records = result.scalars().all()
-    
     return [
         {
             "记录编号": rec.记录编号,
@@ -215,19 +217,63 @@ async def get_active_borrowings(db: AsyncSession = Depends(get_db)):
         for rec in records
     ]
 
-# 6. 还书业务
+# 6. 还书业务（原触发器 3 逻辑与自动计罚已内置）
 @app.post("/api/return")
 async def return_book(req: ReturnRequest, db: AsyncSession = Depends(get_db)):
     try:
-        await db.execute(
-            text("CALL proc_办理还书业务(:reader_id, :book_id)"),
-            {"reader_id": req.reader_id, "book_id": req.book_id}
-        )
-        await db.commit()
-        return {"success": True, "message": "办理还书成功！"}
+        stmt = select(BorrowRecord).where(
+            BorrowRecord.读者编号 == req.reader_id,
+            BorrowRecord.图书编号 == req.book_id,
+            BorrowRecord.归还日期.is_(None)
+        ).limit(1)
+        result = await db.execute(stmt)
+        record = result.scalar_one_or_none()
+
+        if not record:
+            return {"success": False, "message": "还书失败：未查到未还记录，请检查图书编号！"}
+
+        reader = await db.get(Reader, req.reader_id)
+        book = await db.get(Book, req.book_id)
+
+        record.归还日期 = date.today()
+        record.记录状态 = "已归还"
+
+        # 联动恢复库存与借书额度
+        if reader and reader.已借数量 > 0:
+            reader.已借数量 -= 1
+        if book:
+            book.现有库存 += 1
+
+        # 判断逾期并开具罚单
+        if date.today() > record.应还日期:
+            overdue_days = (date.today() - record.应还日期).days
+            multa_amount = overdue_days * 1.5  # 每天 1.5 元
+
+            new_fine = FineRecord(
+                记录编号=record.记录编号,
+                罚款金额=multa_amount,
+                罚款原因="逾期还书",
+                备注="未缴费"
+            )
+            db.add(new_fine)
+
+            if reader:
+                reader.账号状态 = "冻结"
+
+            await db.commit()
+            return {
+                "success": True,
+                "message": f"还书成功：检测到逾期 {overdue_days} 天，罚款 ￥{multa_amount:.2f} 已开具，账号已冻结。"
+            }
+        else:
+            await db.commit()
+            return {"success": True, "message": "还书成功：按期归还，库存与借阅额度已恢复。"}
+
     except Exception as e:
         await db.rollback()
-        raise HTTPException(status_code=400, detail=f"业务处理失败: {str(e)}")
+        raise HTTPException(status_code=400, detail=f"还书业务处理失败: {str(e)}")
+
+# ============ 罚款与维护 API ============
 
 # 7. 获取未缴罚单
 @app.get("/api/fines/unpaid")
@@ -254,9 +300,39 @@ async def get_unpaid_fines(db: AsyncSession = Depends(get_db)):
 @app.post("/api/pay_fine")
 async def pay_fine(req: PayFineRequest, db: AsyncSession = Depends(get_db)):
     try:
-        await db.execute(text("CALL proc_缴纳罚金(:fine_id)"), {"fine_id": req.fine_id})
-        await db.commit()
-        return {"success": True, "message": "缴费成功！"}
+        fine = await db.get(FineRecord, req.fine_id)
+        if not fine:
+            return {"success": False, "message": "罚单不存在！"}
+
+        stmt = select(BorrowRecord).where(BorrowRecord.记录编号 == fine.记录编号)
+        result = await db.execute(stmt)
+        borrow = result.scalar_one_or_none()
+
+        if not borrow:
+            return {"success": False, "message": "关联的借阅记录不存在！"}
+
+        reader_id = borrow.读者编号
+        fine.备注 = "已缴费"
+
+        # 检查该读者是否还有其他未缴罚单
+        stmt_remain = select(FineRecord).join(BorrowRecord).where(
+            BorrowRecord.读者编号 == reader_id,
+            or_(FineRecord.备注 != "已缴费", FineRecord.备注.is_(None)),
+            FineRecord.罚款编号 != fine.罚款编号
+        )
+        result_remain = await db.execute(stmt_remain)
+        restantes = result_remain.scalars().all()
+
+        if len(restantes) == 0:
+            reader = await db.get(Reader, reader_id)
+            if reader:
+                reader.账号状态 = "正常"
+            await db.commit()
+            return {"success": True, "message": "缴费成功！名下罚单已全部结清，账号已恢复正常！"}
+        else:
+            await db.commit()
+            return {"success": True, "message": f"缴费成功！但您仍有 {len(restantes)} 笔未结清，账号维持冻结。"}
+
     except Exception as e:
         await db.rollback()
         raise HTTPException(status_code=400, detail=f"缴费异常: {str(e)}")
@@ -279,7 +355,7 @@ async def scan_and_freeze(db: AsyncSession = Depends(get_db)):
             record.记录状态 = "已逾期"
             overdue_count += 1
 
-        # 查找违规读者
+        # 查找违规读者并冻结
         overdue_reader_subquery = (
             select(BorrowRecord.读者编号)
             .where(BorrowRecord.归还日期.is_(None), BorrowRecord.应还日期 < today)
@@ -292,9 +368,9 @@ async def scan_and_freeze(db: AsyncSession = Depends(get_db)):
             .distinct()
         )
         union_stmt = union(overdue_reader_subquery, unpaid_fine_subquery)
-        stmt = select(Reader).where(Reader.读者编号.in_(union_stmt), Reader.账号状态 == "正常")
-        result = await db.execute(stmt)
-        violators = result.scalars().all()
+        stmt_violator = select(Reader).where(Reader.读者编号.in_(union_stmt), Reader.账号状态 == "正常")
+        result_violator = await db.execute(stmt_violator)
+        violators = result_violator.scalars().all()
         freeze_count = 0
         for reader in violators:
             reader.账号状态 = "冻结"
@@ -331,6 +407,8 @@ async def get_categories(db: AsyncSession = Depends(get_db)):
     result = await db.execute(stmt)
     categories = result.scalars().all()
     return [{"类别编号": c.类别编号, "类别名称": c.类别名称} for c in categories]
+
+# ============ 读者管理 API ============
 
 # 13. 创建新读者
 @app.post("/api/readers")

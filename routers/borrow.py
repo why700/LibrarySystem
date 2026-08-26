@@ -79,9 +79,13 @@ async def get_active_borrowings(db: AsyncSession = Depends(get_db)):
         for rec in records
     ]
 
+# routers/borrow.py 内部的 return_book 函数
+
+# routers/borrow.py
 @router.post("/return")
 async def return_book(req: ReturnRequest, db: AsyncSession = Depends(get_db)):
     try:
+        # 1. 查找对应的未还借阅记录
         stmt = select(BorrowRecord).where(
             BorrowRecord.读者编号 == req.reader_id,
             BorrowRecord.图书编号 == req.book_id,
@@ -91,41 +95,57 @@ async def return_book(req: ReturnRequest, db: AsyncSession = Depends(get_db)):
         record = result.scalar_one_or_none()
 
         if not record:
-            return {"success": False, "message": "还书失败：未查到未还记录，请检查图书编号！"}
+            return {"success": False, "message": "还书失败：未查到该借阅记录，请确认是否已归还！"}
 
         reader = await db.get(Reader, req.reader_id)
         book = await db.get(Book, req.book_id)
 
+        # 2. 更新借阅记录状态
         record.归还日期 = date.today()
         record.记录状态 = "已归还"
 
+        # 3. 恢复在馆库存与已借数量
         if reader and reader.已借数量 > 0:
             reader.已借数量 -= 1
         if book:
             book.现有库存 += 1
 
+        # 4. 判断逾期
         if date.today() > record.应还日期:
             overdue_days = (date.today() - record.应还日期).days
-            multa_amount = overdue_days * 1.5
-            new_fine = FineRecord(
-                记录编号=record.记录编号,
-                罚款金额=multa_amount,
-                罚款原因="逾期还书",
-                备注="未缴费"
-            )
-            db.add(new_fine)
+            multa_amount = round(overdue_days * 1.5, 2)
+
+            # ✅ 核心修复：检查是否已有罚款记录（防 Duplicate entry '12' 冲突）
+            stmt_fine = select(FineRecord).where(FineRecord.记录编号 == record.记录编号)
+            fine_result = await db.execute(stmt_fine)
+            existing_fine = fine_result.scalar_one_or_none()
+
+            if existing_fine:
+                existing_fine.罚款金额 = multa_amount
+                existing_fine.罚款原因 = f"逾期还书（超期 {overdue_days} 天）"
+                existing_fine.备注 = "未缴费"
+            else:
+                new_fine = FineRecord(
+                    记录编号=record.记录编号,
+                    罚款金额=multa_amount,
+                    罚款原因=f"逾期还书（超期 {overdue_days} 天）",
+                    备注="未缴费"
+                )
+                db.add(new_fine)
+
+            # 读者账号设为冻结
             if reader:
                 reader.账号状态 = "冻结"
 
             await db.commit()
             return {
                 "success": True,
-                "message": f"还书成功：检测到逾期 {overdue_days} 天，罚款 ￥{multa_amount:.2f} 已开具，账号已冻结。"
+                "message": f"还书成功！检测到逾期 {overdue_days} 天，已生成/更新 ￥{multa_amount} 罚单，账号处于冻结状态（请前往缴纳罚金）。"
             }
         else:
             await db.commit()
-            return {"success": True, "message": "还书成功：按期归还，库存与借阅额度已恢复。"}
+            return {"success": True, "message": "还书成功！按期归还，库存与借阅额度已恢复。"}
 
     except Exception as e:
         await db.rollback()
-        raise HTTPException(status_code=400, detail=f"还书业务处理失败: {str(e)}")
+        return {"success": False, "message": f"还书业务处理失败: {str(e)}"}

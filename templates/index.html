@@ -98,9 +98,23 @@
                     <div id="returnResult" class="mt-3"></div>
                 </div>
 
-                <!-- 罚金 -->
+                <!-- 罚金板块 -->
                 <div id="tab-fine" class="tab-content" style="display:none;">
+                    <!-- 🔍 新增：罚单搜索筛选栏 -->
+                    <div class="row g-3 mb-3">
+                        <div class="col-md-6">
+                            <input type="text" id="fineSearchInput" class="form-control" 
+                                placeholder="🔍 输入读者姓名筛选罚单..." oninput="filterFines()">
+                        </div>
+                        <div class="col-md-6 d-flex align-items-center">
+                            <span id="fineCountBadge" class="text-muted small">加载中...</span>
+                        </div>
+                    </div>
+
+                    <!-- 罚单卡片列表 -->
                     <div id="fineList"></div>
+                    
+                    <!-- 缴纳按钮与提示 -->
                     <button class="btn btn-danger mt-3" onclick="payFine()">缴纳选中罚单</button>
                     <div id="fineResult" class="mt-3"></div>
                 </div>
@@ -160,6 +174,6 @@
             </main>
         </div>
     </div>
-    <script src="/static/script.js"></script>
+    <script type="module" src="/static/js/main.js"></script>
 </body>
 </html>
